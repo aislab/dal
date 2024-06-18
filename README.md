@@ -19,13 +19,15 @@ To run comparative evaluation with the Stable Baselines 3 implementation of A2C,
 ### Notes
 
 - The implementation is designed to run on CPUs, to facilitate parallel evaluation of populations of neural networks of heterogeneous architecture. Each individual runs as a separate subprocess, so the system runs best on machines with many CPU cores.
-- If you get GPU OOM errors, chances are the subprocesses are all trying to claim GPU memory. In this case, make the GPU(s) invisible using e.g. the CUDA_VISIBLE_DEVICES environment variable.
+- If you get GPU OOM errors, chances are the subprocesses are all trying to claim GPU memory. An easy solution is to make the GPU(s) invisible using e.g. the CUDA_VISIBLE_DEVICES environment variable.
 - When running on a screenless machine you may need a virtual framebuffer. We used xvfb for this as follows: `xvfb-run -a python run.py RUN_NAME [FROM_GENERATION] [-u] [-e]`.
 
 ## Evolution
 
 Run:
->`python run.py RUN_NAME [FROM_GENERATION] [-u]`
+```
+python run.py RUN_NAME [FROM_GENERATION] [-u]
+```
 
 Where:\
 `RUN_NAME`: A freely chosen name for the run, or the name of an existing run you wish to continue.\
@@ -44,7 +46,7 @@ When resuming an existing run, you should indicate whether or not you want to co
 
 A few implications:
 -   Modifying source in the base directory does not affect a running run.
--   Modifying source in the `runs/RUN_NAME/source/` directory CAN affect an ongoing run. Due to subprocesses being launched repeatedly during evolution, you can break a running run by modifying its local source files (`nmnn.py` in particular).
+-   Modifying source in the `runs/RUN_NAME/source/` directory CAN affect an ongoing run. Due to subprocesses being launched repeatedly during evolution, you can break a running run by modifying its local source files (`config.py` and `nmnn.py` in particular).
 -   If you modify source in the base directory and want to resume an existing run using the newly modified code, you must resume WITH the `-u` flag to update the run's copy of the source code.
 -   If you have modified source in the base directory and want to resume an existing run using the original unmodified code that the run was launched with, you must resume WITHOUT the `-u` flag.
 -   If you want to make changes specifically to the source code of an existing run, stop the run, modify the code in the `runs/RUN_NAME/source/` directory, and then resume the run WITHOUT the `-u` flag.
@@ -63,12 +65,14 @@ To replicate the "RL with bottlenecked NM" baseline, set `restrict_modulating_ne
 
 ### Notes:
 - If terminal output looks garbled, you may need to widen the terminal window.
-- To see more detailed information in the terminal during evolution, disable `suppress_nn_prints in config.py`. This allows NNs to print their own information to the terminal (asynchronously).
+- To see more detailed information in the terminal during evolution, disable `suppress_nn_prints` in `config.py`. This allows NNs to print their own information to the terminal (asynchronously).
 
 ## Plotting evolution
 
 Plot for single run (fig 4b,e,f in the paper):
->`python plot_evolution RUN_NAME [LIMIT]`
+```
+python plot_evolution RUN_NAME [LIMIT]
+```
 
 Where:\
 `RUN_NAME`: Name of an existing run.\
@@ -78,7 +82,9 @@ Plots are saved to `runs/RUN_NAME`.
 
 ---
 Plot over multiple runs (fig 4a in the paper):
->`python plot_evolution_multi.py RUN_NAME1 [RUN_NAME2] [RUN_NAME3] ...`
+```
+python plot_evolution_multi.py RUN_NAME1 [RUN_NAME2] [RUN_NAME3] ...
+```
 
 Where:\
 `RUN_NAMEx`: Name of an existing run.
@@ -86,14 +92,16 @@ Where:\
 The plot is saved to the base directory.
 
 Notes:
-- If your runs have different lengths, set the limit variable at the top of plot_evolution_multi.py to specify the number of generations to plot.
+- If your runs have different lengths, set the limit variable at the top of `plot_evolution_multi.py` to specify the number of generations to plot.
 - Plotting over multiple runs assumes that all runs have RL and NM both enabled.
 
 ## Evaluation
 
 You can evaluate the focal individual from a specific generation in an existing run using the `-e` flag.\
 Run:
->`python run.py RUN_NAME [FROM_GENERATION] -e [-u]`
+```
+python run.py RUN_NAME [FROM_GENERATION] -e [-u]
+```
 
 Where:\
 `RUN_NAME`: Name of the run to evaluate.\
@@ -108,7 +116,9 @@ Evaluation mode produces the files `evaluation_log.csv` and `evaluation_log.npy`
 ---
 We compared our A2C implementation to the Stable Baselines 3 implementation to ensure that ours is on par.\
 To replicate this evaluation, run:
->`python SB_task_interface RUN_NAME`
+```
+python SB_task_interface RUN_NAME
+```
 
 Where:\
 `RUN_NAME`: an unused run name
@@ -118,22 +128,27 @@ This produces an `evaluation_log.npy` file as above.
 ## Plotting evaluations
 Evaluation results can be plotted as follows (fig 4g in the paper).\
 Run:
->`python plot_evaluation.py RUN_NAME1 LABEL1 [RUN_NAME2] [LABEL2] [RUN_NAME3] [LABEL3] ...`
+```
+python plot_evaluation.py RUN_NAME1 LABEL1 [RUN_NAME2] [LABEL2] [RUN_NAME3] [LABEL3] ...
+```
 
 Where:\
-    `RUN_NAMEx`: Name of a run for which evaluation_log.npz exists.\
+    `RUN_NAMEx`: Name of a run for which evaluation_log.npy exists.\
     `LABELx`: Plotting label for run RUN_NAMEx.
 
 ---
-First-trial agents trajectories can be plotted as follows (fig 5 in the paper).\
+First-trial agent trajectories can be generated as follows (fig 5 in the paper).\
 Run:
->`python analyse_learning_process.py RUN_NAME`
+```
+python analyse_learning_process.py RUN_NAME
+```
 
 Where:\
 `RUN_NAME`: Name of an existing run.
 
 Figures of the agent trajectories are stored in `runs/RUN_NAME/`.\
-The list of generations to visualise can be found near the top of `analyse_learning_process.py`.
+The list of generations to analyse can be found near the top of `analyse_learning_process.py`.
+The test set of target positions is fixed across the generations, and determined by the seed in `config.py`.
 
 ---
 
@@ -141,3 +156,4 @@ The list of generations to visualise can be found near the top of `analyse_learn
 Breaching the Bottleneck: Evolutionary Transition from Reward-Driven Learning to Reward-Agnostic Domain-Adapted Learning in Neuromodulated Neural Nets\
 Solvi Arnold, Reiji Suzuki, Takaya Arita, Kimitoshi Yamazaki\
 ALIFE 2024 (The 2024 Conference on Artificial Life)
+

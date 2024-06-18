@@ -94,7 +94,7 @@ if __name__ == '__main__':
     check_env(env)
     
     # settings
-    n_task_instances = 10
+    n_task_instances = 32
     n_training_trials = 5000
     policy_kwargs = dict(net_arch=dict(pi=[8],vf=[8]))
     

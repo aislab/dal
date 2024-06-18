@@ -10,7 +10,7 @@ from functools import partial
 import optax
 
 
-# convenience global for process inditification in prints
+# convenience global for NN inditification in prints
 individual_id = None
 
 
@@ -20,43 +20,48 @@ def pprint(*m):
         print('[NN:'+str(individual_id)+']', *m)
 
 
-def dense_layer_weights(rng_key,ni,nj):
+# make random projection weights.
+def make_projection_weights(rng_key,ni,nj):
     r = jp.sqrt(1/ni)
     w = jax.random.uniform(rng_key,(ni,nj),minval=-r,maxval=r)
     return w
     
 
+# make an activatory projection.
 def make_projection_a(rng_key,ni,nj,origin):
-    w = dense_layer_weights(rng_key,ni,nj)
+    w = make_projection_weights(rng_key,ni,nj)
     return Projection(w,origin,origin)
 
 
+# make a modulatory projection.
 def make_projection_m(rng_key,nm,ni,nj,origin,for_guided_init):
+
     rng_key, *kk = jax.random.split(rng_key,7)
     priority = jax.random.uniform(kk[0])
-    rate_multiplier = 0.01
-    target_multiplier = 0.01 if for_guided_init else 1.0
-    gate_multiplier = 0.01
+    beta_multiplier = 0.01
+    tgtw_multiplier = 0.01 if for_guided_init else 1.0
+    eta_multiplier = 0.01
 
     hidden_multiplier = 0.01 if for_guided_init else 1.0
-    wih = hidden_multiplier*dense_layer_weights(kk[1],nm+1,2*cfg.nm_hidden_column_size)
-    whr = rate_multiplier*dense_layer_weights(kk[2],2*cfg.nm_hidden_column_size,ni*nj)
-    wht = target_multiplier*dense_layer_weights(kk[3],2*cfg.nm_hidden_column_size,ni*nj)
-    ww = [wih,whr,wht]
+    wih = hidden_multiplier*make_projection_weights(kk[1],nm+1,cfg.nm_fm_hidden_column_size)
+    who_beta = beta_multiplier*make_projection_weights(kk[2],cfg.nm_fm_hidden_column_size,ni*nj)
+    who_tgtw = tgtw_multiplier*make_projection_weights(kk[3],cfg.nm_fm_hidden_column_size,ni*nj)
+    ww = [wih,who_beta,who_tgtw]
 
     if cfg.nm_eta_enabled:
         input_dim = 1
         if cfg.eta_sees_k: input_dim+=nm+1
         if cfg.eta_sees_i: input_dim+=ni
         if cfg.eta_sees_j: input_dim+=nj
-        wih_g = gate_multiplier*dense_layer_weights(kk[4],input_dim,cfg.nm_hidden_column_size)
-        gate_res = 1 if cfg.projection_level_eta else ni*nj
-        who_g = gate_multiplier*dense_layer_weights(kk[5],cfg.nm_hidden_column_size,gate_res)
-        ww = ww+[wih_g,who_g]
+        wih_eta = eta_multiplier*make_projection_weights(kk[4],input_dim,cfg.nm_fg_hidden_column_size)
+        eta_res = 1 if cfg.projection_level_eta else ni*nj
+        who_eta = eta_multiplier*make_projection_weights(kk[5],cfg.nm_fg_hidden_column_size,eta_res)
+        ww = ww+[wih_eta,who_eta]
 
     return Projection(ww,origin,origin,priority)
         
 
+# check if there are paths from the input column to all output columns.
 def check_connected(grid):
     if not cfg.enforce_connectedness:
         return True
@@ -73,31 +78,34 @@ def check_connected(grid):
     return True
         
 
+# forward propagation.
 @partial(jax.jit,static_argnums=(2,))
 def dense_forward(w,a,activation_function):
-    
     # set bias neuron activation to 1
     a = a.at[...,-1].set(1)
     if activation_function is None:
         a = jp.matmul(a,w)
     else:
         a = jp.matmul(activation_function(a),w)
-        
     return a
     
-    
+
+# vmap map meep meep.
 multi_w_dense_forward = jax.vmap(dense_forward,in_axes=[0,0,None])
-B2_dense_layer_forward = jax.vmap(multi_w_dense_forward,in_axes=[0,0,None])
+multi_multi_w_dense_forward = jax.vmap(multi_w_dense_forward,in_axes=[0,0,None])
 fixed_weight_multi_w_dense_forward = jax.vmap(dense_forward,in_axes=[None,0,None])
 fixed_weight_multi_multi_w_dense_forward = jax.vmap(fixed_weight_multi_w_dense_forward,in_axes=[None,0,None])
 
 
+# gradient clipping.
 def clip_grad_norm(grad, max_norm):
-    norm = jp.linalg.norm(jp.array(jax.tree_util.tree_leaves(jax.tree_map(jp.linalg.norm, grad))))
-    clip = lambda x: jp.where(norm < max_norm, x, x * max_norm / (norm + 1e-6))
+    norm = jp.linalg.norm(jp.array(jax.tree_util.tree_leaves(jax.tree_map(jp.linalg.norm,grad))))
+    clip = lambda x: jp.where(norm<max_norm,x,x*max_norm/(norm+1e-6))
     return jax.tree_util.tree_map(clip, grad)
     
 
+# calculate beta and target weight values for modulatory projection.
+@jax.jit
 def nm_beta_and_tgtw(a,nm_proj_w):
     wih,whr,wht = nm_proj_w[:3]
     ah = fixed_weight_multi_w_dense_forward(wih,a,cfg.activation_function_hidden_nm)
@@ -108,15 +116,13 @@ def nm_beta_and_tgtw(a,nm_proj_w):
 multi_nm_beta_and_tgtw = jax.vmap(nm_beta_and_tgtw,in_axes=[0,None])
 
 
+# calculate eta values for modulatory projection.
 @jax.jit
 def nm_eta(am,ai,w,nm_proj_w):
     wih, who = nm_proj_w[-2:]
-    
     aj_local = multi_w_dense_forward(w,ai,cfg.activation_function_hidden)
-    
     bias_shape = ai.shape[:-1]+(1,)
     bias = jp.ones(bias_shape)
-    
     a = [bias]
     if cfg.eta_sees_k: a.append(am)
     if cfg.eta_sees_i: a.append(ai)
@@ -127,19 +133,17 @@ def nm_eta(am,ai,w,nm_proj_w):
     return eta[...,None]
 
 
+# given target weights, beta, and activation of the pre-synaptic and modulatory columns, calculate the new weight.
+# during guided initialisation, calculation of weight target and beta can be parallelised, but eta has to be calculated serially,
+# because it depends on the activation of the post-synaptic neuron, which in turn depends on preceding weight updates.
 @jax.jit
 def w_update_nm(w,w_geno,beta,tgtw,am,ai,nm_proj_w):
-    
     tgtw = tgtw.reshape(w.shape)
-    
     if cfg.nm_target_relative_to_geno_w:
         tgtw += w_geno
-    
     dw = tgtw-w
-    
     if cfg.nm_beta_enabled:
         dw *= beta.reshape(w.shape)
-    
     if cfg.nm_eta_enabled:
         eta = nm_eta(am,ai,w,nm_proj_w)
         if not cfg.projection_level_eta:
@@ -149,6 +153,7 @@ def w_update_nm(w,w_geno,beta,tgtw,am,ai,nm_proj_w):
         return w+dw, 0
 
 
+# given activation of the pre-synaptic, post-synaptic, and modulatory columns, perform the weight update for a modulatory projection.
 @jax.jit
 def nm_weight_update(am,ai,aj,w,nm_proj_w,w_geno):
     am = jp.pad(am,((0,0),(0,1)),mode='constant')
@@ -157,6 +162,7 @@ def nm_weight_update(am,ai,aj,w,nm_proj_w,w_geno):
     return w, g
 
     
+# loss function for guided initialisation of modulatory projections.
 @partial(jax.jit,static_argnums=(0,8,9))
 def guided_weight_init_loss(n_a,
                             activation_history_k,
@@ -212,10 +218,10 @@ def guided_weight_init_loss(n_a,
             if cfg.guided_weight_modification_diff_function == 'mse':
                 l = (((aj_new-aj_via_final)**2)*fitness_weights[:,None]).mean(1)
         
-        if cfg.nm_beta_enabled and cfg.nm_rate_loss_weight>0:
-            l += cfg.nm_rate_loss_weight*beta.mean(1)/n_steps
-        if cfg.nm_eta_enabled and cfg.nm_gate_loss_weight>0:
-            l += cfg.nm_gate_loss_weight*g.mean((1,2))/n_steps
+        if cfg.nm_beta_enabled and cfg.nm_beta_loss_weight>0:
+            l += cfg.nm_beta_loss_weight*beta.mean(1)/n_steps
+        if cfg.nm_eta_enabled and cfg.nm_eta_loss_weight>0:
+            l += cfg.nm_eta_loss_weight*g.mean((1,2))/n_steps
         
         return (loss+l,w), l
         
@@ -228,11 +234,11 @@ def guided_weight_init_loss(n_a,
     
     
 guided_init_loss_grad = jax.value_and_grad(guided_weight_init_loss,argnums=(4,6),has_aux=True)
-    
-# w_weights should be previously or randomly initialised [wr,wi,wj] list.
-# this list will be optimised to reproduce w_final as quickly as possible.
-# assumes that the weight updates do not affect the activation sequence at the modulating neuron
-# (i.e. assumes there are no recurrent effects from the post-a-synaptic neuron into the modulating neuron).
+
+
+# guided initialisation for modulatory projections.
+# in the interest of computational efficiency, we assume that the weight updates do not affect future activation patterns at the pre-synaptic and modulating columns.
+# note that this assumption may be violated when column m modulates a projection on a path from the input to column m.
 def guided_weight_modification_m(rng_key,
                                  activation_history_k,
                                  activation_history_i,
@@ -244,35 +250,42 @@ def guided_weight_modification_m(rng_key,
                                  new_projection,
                                  activation_function_i,
                                  activation_function_j):
+    
     if cfg.guided_weight_modification_loss_locus == 'activation':
         # last weight update happens AFTER the final entry into the activation history, 
         # so for consistency with the activation history we should use the second-to-last weight.
         w_final = w_record[-2]
+    
     if cfg.guided_weight_modification_loss_locus == 'weight':    
         w_final = w_record[-1]
+    
     if (w_geno[None]==w_final).all():
         # this can happen when Rl updates were disabled and just got enabled during mutation (?)
         pprint('no weight change available for guided modification...')
         return None, None
+    
     activation_history_k = jp.array(activation_history_k)
     activation_history_i = jp.array(activation_history_i)
     activation_history_j = jp.array(activation_history_j)
+    
     pprint('guided_weight_modification_m with activation history:', activation_history_k.shape, jp.abs(activation_history_k).sum())
     if jp.isnan(activation_history_k).any():
         pprint('NaN value in activation history --> cancel guided_weight_init')
         return None, None
     n_a = activation_history_k.shape[0]
     
+    # calculate fitness weight per task instance
     fmin = fitness_per_task.min()
     fmax = fitness_per_task.max()
     fitness_weights = (fitness_per_task-fmin)/(fmax-fmin)
+    
     # clip fitness weights at random threshold and rescale to [0,1]
     if cfg.fitness_weight_clipping:
         rng_key, k = jax.random.split(rng_key)
         clip_threshold = jax.random.uniform(k)
         fitness_weights = (fitness_weights-clip_threshold)/(1-clip_threshold)
         fitness_weights = jp.clip(fitness_weights,0,1)
-    i_best_fitness = fitness_per_task.argmax()
+        
     best_loss = np.inf
     best_m_weights = None
     stale = 0
@@ -330,9 +343,9 @@ def guided_weight_modification_m(rng_key,
         for i_weight, g in enumerate(m_w_grads):
             m_weights[i_weight] -= lr*(jp.sign(g) if cfg.guided_weight_init_signSGD else g)
         n_updates_performed += 1
-        utils.print_progress(i_iteration,n_max_iterations,message='NN:'+str(individual_id).rjust(3)+' loss:'+str(loss).rjust(14)+' rate:'+str(lr).rjust(14))
+        utils.print_progress(i_iteration,n_max_iterations,message='NN:'+str(individual_id).rjust(3)+'  loss: '+str('%1.5e'%loss).rjust(11)+'  rate: '+str('%1.5e'%lr).rjust(11))
     if stale < cfg.n_guided_weight_stop_at_stale_count:
-        utils.print_progress(message='NN:'+str(individual_id).rjust(3)+' loss:'+str(loss).rjust(14)+' rate:'+str(lr).rjust(14))
+        utils.print_progress(message='NN:'+str(individual_id).rjust(3)+'  loss: '+str('%1.5e'%loss).rjust(11)+'  rate: '+str('%1.5e'%lr).rjust(11))
     
     w_final_std = jp.std(w_final,axis=0)
     pprint('weight range over w_final:', w_final.min(), w_final.max())
@@ -360,7 +373,7 @@ def guided_weight_modification_m(rng_key,
         aj_new = f(w_a_obtained[:i_to],activation_history_i[-5:,:i_to],activation_function_i)
         
         if cfg.actvation_locus_loss_considers_activation_from_elsewhere:
-            f = B2_dense_layer_forward#jax.vmap(dense_forward,in_axes=[0,0,None])
+            f = multi_multi_w_dense_forward
             aj_via_original = f(jp.array(w_record[-6:-1])[:,:i_to],activation_history_i[-5:,:i_to],activation_function_i)
             aj_from_elsewhere = activation_history_j[-5:,:i_to]-aj_via_original
             aj_via_geno += aj_from_elsewhere
@@ -473,7 +486,8 @@ def _forward(io_list_a,w_list_a,n_columns,obs):
 
 _forward_interval = jax.vmap(_forward,in_axes=[None,None,None,0])
 
-    
+
+# draw a random action from the given action distribution
 @jax.jit
 def draw_action(action_key,action_dist,action_sigma_bias):
 
@@ -486,9 +500,10 @@ def draw_action(action_key,action_dist,action_sigma_bias):
 
     return action, loc, scale
     
-    
+
+# RL loss function
 @partial(jax.jit, static_argnums=(0,3,7,8))
-def calculate_rl_loss_v2(io_list_a,w_list_a,action_key,n_columns,obs,reward,action_sigma_bias,loss_weights,done):
+def calculate_rl_loss(io_list_a,w_list_a,action_key,n_columns,obs,reward,action_sigma_bias,loss_weights,done):
     
     _, action_dist, V_estimate = _forward_interval(io_list_a,w_list_a,n_columns,obs)
     action_dist = action_dist[:-1]
@@ -531,11 +546,12 @@ def calculate_rl_loss_v2(io_list_a,w_list_a,action_key,n_columns,obs,reward,acti
 
 
 rl_loss_grad_v2 = jax.value_and_grad(
-    calculate_rl_loss_v2,
+    calculate_rl_loss,
     argnums=1,
     has_aux=True)
 
 
+# RL weight update logic
 def _reinforcement_learning_update(io_list_a,
                                    w_list_a,
                                    action_key,
@@ -619,20 +635,16 @@ class nn:
             if cfg.disallow_direct:
                 self.connectivity_grid_a[0,-cfg.n_output_columns:] = 0
         else:
-            self.connectivity_grid_a = np.array(cfg.initial_connectivity)
+            self.connectivity_grid_a = cfg.initial_connectivity
         self.connectivity_grid_m = np.zeros((self.n_columns,self.n_columns,self.n_columns))
         self.rl_susceptible = np.ones((self.n_columns,self.n_columns))*cfg.initial_rl_susceptibility
-        
-        assert self.connectivity_grid_a.ndim==2 and \
-               self.connectivity_grid_a.shape[0]==self.connectivity_grid_a.shape[1] and \
-               set(np.unique(self.connectivity_grid_a)) <= set((0,1)), \
-               'config.connectivity must be a 2D square binary matrix'
                
-        # input layers have neuron count equal to state observation size + 1 bias neuron.
-        # hidden layers all have neuron count equal to cfg.hidden_dims + 1 bias neuron.
+        # input layers have neuron count equal to extended observation size.
+        # hidden layers all have neuron count equal to cfg.hidden_dims.
         # there are two output layers:
         #   - an output layer producing an estimate of state-value V (1 neuron).
-        #   - an output layer producing an action (neuron count equal to action size).
+        #   - an output layer producing an action distribution (neuron count equal to two times action size).
+        # a bias neuron is added to each column. the activation value of the bias neuron is set to 1 during propagation.
         self.n_neurons_in_column = [cfg.obs_dims+1]+[cfg.hidden_dims+1]*(self.n_columns-3)+[1+1]+[2*cfg.act_dims+1]
         
         # RL-related genes
@@ -648,6 +660,7 @@ class nn:
         else:
             self.action_sigma_bias = cfg.action_sigma_bias_init
         
+        # RL training loss weights
         if cfg.evolve_loss_weights:
             self.rng_key, *kk = jax.random.split(self.rng_key,4)
             self.actor_loss_weight = jax.random.uniform(kk[0],minval=0,maxval=cfg.max_actor_loss_weight)
@@ -669,11 +682,14 @@ class nn:
         self.reset()
 
 
+    # sets NN ID as global variable to simplify printing with NN identification.
     def set_id_global(self):
         global individual_id
         individual_id = self.individual_id
 
 
+    # initialise genotypic projections.
+    # sets up a new genotype on basis of the connectivity grids.
     def init_geno_projections(self):
         def init_projection_type_a(connectivity_grid):
             geno_projections = np.empty(connectivity_grid.shape,dtype=object)
@@ -709,22 +725,22 @@ class nn:
         self.geno_projections_m = init_projection_type_m(self.connectivity_grid_m)
         
         
+    # builds the list of activation functions for all columns.
     def set_activation_functions(self):
         self.activation_functions = []
-        for i in range(self.n_columns):
-            if i<cfg.n_input_columns:
-                self.activation_functions.append(cfg.activation_function_obs)
-            elif i<self.n_columns-cfg.n_output_columns:
-                self.activation_functions.append(cfg.activation_function_hidden)
-            elif i==self.n_columns-2:
-                self.activation_functions.append(cfg.activation_function_action)
-            elif i==self.n_columns-1:
-                self.activation_functions.append(cfg.activation_function_value)
+        for i in range(cfg.n_input_columns):
+            self.activation_functions.append(cfg.activation_function_obs)
+        for i in range(cfg.n_input_columns,self.n_columns-cfg.n_output_columns):
+            self.activation_functions.append(cfg.activation_function_hidden)
+        self.activation_functions.append(cfg.activation_function_action)
+        self.activation_functions.append(cfg.activation_function_value)
         
         
+    # initialise phenotypic projections.
+    # produces a live NN from the genotype.
     def init_pheno_projections(self):
         
-        # reset weight records
+        # reset weight records.
         for indices in np.array(np.where(self.connectivity_grid_a)).T:
             self.geno_projections_a[tuple(indices)].w_record = []
         
@@ -757,57 +773,53 @@ class nn:
                             self.column_has_output[i] = 1
                             stable = False
         
-        # construct io lists as tuples so they can be hashed (necessary for use as static args in jitted methods)
+        # construct io lists as tuples so they can be hashed (necessary for use as static args in jitted methods).
         self.io_list_a = tuple((i,j,s) for (i,j),s in zip(a_ij,sus) if self.column_has_input[i] and self.column_has_output[j])
         
-        # construct weight lists
+        # construct activatory weight lists.
         self.w_list_a = [r(self.geno_projections_a[i,j].w) for (i,j,s) in self.io_list_a]
         grid_to_list_a = {(i,j):list_index for list_index,(i,j,_) in enumerate(self.io_list_a)}
         
+        # lists for tracking per-projection total weight change induced by RL and NM.
         self.total_dw_list_rl = [0 for _ in self.io_list_a]
         self.total_dw_list_nm = [0 for _ in self.io_list_a]
         
-        # sort indices by projection priority
+        # sort indices by projection priority.
         m_kij = sorted(m_kij,key=lambda x: self.geno_projections_m[tuple(x)].priority)
         
+        # construct modulatory weight lists.
         self.io_list_m = tuple((k,grid_to_list_a[(i,j)]) for (k,i,j) in m_kij if self.column_has_input[k] and self.column_has_input[i] and self.column_has_output[j] and (i,j) in grid_to_list_a)
         self.w_list_m = [self.geno_projections_m[k,i,j].w for (k,i,j) in m_kij if self.column_has_input[k] and self.column_has_input[i] and self.column_has_output[j] and (i,j) in grid_to_list_a]
         
+        # mean RL learning rate over live projections.
         self.mean_active_rl_learning_rate = self.rl_learning_rate*np.mean([s for (i,j,s) in self.io_list_a])
             
     
     # convenience forward for external use
     def forward(self,obs):
-
         self.a, action0_dist, V_estimate0 = _forward(self.io_list_a,self.w_list_a,self.n_columns,obs)
         self.activation_history.append(self.a)
-        
         return action0_dist, V_estimate0
     
     
+    # processes observation and returns an action.
     def choose_action(self,action_key,obs):
         action_dist, v_est = self.forward(obs)
         action, loc, scale = draw_action(action_key,action_dist,self.action_sigma_bias)
-        if jp.isnan(action).any():
-            pprint('ERROR: NaN in action')
-            pprint('loc:')
-            pprint(loc[jp.isnan(action)])
-            pprint('scale:')
-            pprint(scale[jp.isnan(action)])
-            pprint(self.rl_learning_rate)
-            pprint(self.rl_susceptible)
-        
         self.action_history.append((action,loc,scale))
         return action
     
     
+    # updates the RL buffers and, if either a full RL update interval has passed or the trial has ended, run the RL weight update.
     def reinforcement_learning_update(self,action_key,obs0,obs1,reward,done):
+        
         if not self.rl_enabled: return
+        
         self.rl_buffer['obs'].append(obs0)
         self.rl_buffer['reward'].append(reward)
         self.rl_buffer['action_key'].append(action_key)
         
-        if done or len(self.rl_buffer['reward']) == cfg.n_trial_time_steps:
+        if done or len(self.rl_buffer['reward']) == cfg.rl_weight_update_interval:
             self.rl_buffer['obs'].append(obs1)
             loss_weights = (self.actor_loss_weight, self.critic_loss_weight, self.entropy_loss_weight)
             self.w_list_a, dw_list_a, V_estimate0, grads, self.opt_state = \
@@ -831,6 +843,7 @@ class nn:
                 self.total_dw_list_rl[i] += dw
     
     
+    # run NM weight update.
     def neuromodulation_update(self):
 
         if not self.nm_enabled: return
@@ -845,17 +858,21 @@ class nn:
             self.w_list_a[i_a] = w
     
     
+    # add the current weights to the weight record.
     def record_weights(self):
         for ((i,j,_),w) in zip(self.io_list_a,self.w_list_a):
             self.geno_projections_a[i,j].w_record.append(w.copy())
             
     
+    # adds trial fitness to overall normalised fitness.
     def add_fitness(self,trial_fitness):
         self.raw_fitness += trial_fitness.mean()
         self.trial_fitness_log.append(trial_fitness)
         self.normalised_fitness = self.raw_fitness/len(self.trial_fitness_log)
     
     
+    # report various statistics as a dict.
+    # used by the main process to collect statistics.
     def report_stats(self):
         # calculate total net weight change due to RL
         self.total_weight_change_rl = 0
@@ -878,10 +895,14 @@ class nn:
         return stats
     
     
+    # reports a record of the agent's actions.
+    # used for trajectory visualisation by analyse_learning_process.py.
     def report_action_history(self):
         return np.array(self.action_history)
     
         
+    # sends the genotype (plus some logs) to the NN at the other end of the given pipe.
+    # the main process directs this pipe to an NN that should clone this NN.
     def send_genotype_to_child(self,pipe):
         genotype = {
             'parent_id': self.individual_id,
@@ -901,6 +922,7 @@ class nn:
         pipe.send(genotype)
     
     
+    # rewrites the NN into a clone of the NN at the other end of the peer pipe (i.e. the parent).
     def clone_from_parent(self):
         
         genotype = self.peer_pipe.recv()
@@ -934,12 +956,8 @@ class nn:
         self.trial_fitness_log = genotype['trial_fitness_log']
         self.activation_history = genotype['activation_history']
         
-    
-    def clear_mutation_list(self):
-        self.mutations_applied = []
         
-    
-    # projection deletion
+    # projection deletion mutation.
     def projection_deletion(self,connectivity_grid,geno_projections,mutation_rate,projection_type):
         local_changed = False
         self.rng_key, k = jax.random.split(self.rng_key)
@@ -949,7 +967,7 @@ class nn:
                 pp = np.where(connectivity_grid)
             else:
                 # don't allow deletion of initial connectivity
-                pp = np.where(np.logical_and(connectivity_grid,1-np.array(cfg.initial_connectivity)))
+                pp = np.where(np.logical_and(connectivity_grid,1-cfg.initial_connectivity))
             if len(pp[0]): # abort if no projections left
                 self.rng_key, k = jax.random.split(self.rng_key)
                 indices = jax.random.choice(k,np.array(pp),axis=1)
@@ -971,7 +989,7 @@ class nn:
         return connectivity_grid, geno_projections, local_changed
                        
     
-    # mutation for inserting activatory projections
+    # mutation for inserting activatory projections.
     def projection_insertion_a(self,connectivity_grid,geno_projections,allow_recurrent):
         local_changed = False
         self.rng_key, k = jax.random.split(self.rng_key)
@@ -1002,7 +1020,7 @@ class nn:
         return connectivity_grid, geno_projections, local_changed
     
     
-    # mutation for inserting modulatory projections
+    # mutation for inserting modulatory projections.
     def projection_insertion_m(self,connectivity_grid,geno_projections,allow_recurrent):
         local_changed = False
         self.rng_key, k = jax.random.split(self.rng_key)
@@ -1071,7 +1089,7 @@ class nn:
         return connectivity_grid, geno_projections, local_changed
         
 
-    # subroutine for modifying projection weights
+    # subroutine for modifying projection weights.
     def mutate_w(self,w):
         if type(w) is list:
             self.rng_key, k = jax.random.split(self.rng_key)
@@ -1082,11 +1100,11 @@ class nn:
             sh = w.shape
             self.rng_key, *kk = jax.random.split(self.rng_key,5)
             mask = jax.random.uniform(kk[0],sh)<jax.random.uniform(kk[1])
-            dw = cfg.max_weight_mutation_strength*jax.random.uniform(kk[2],sh)*mask*dense_layer_weights(kk[3],sh[-2],sh[-1])
+            dw = cfg.max_weight_mutation_strength*jax.random.uniform(kk[2],sh)*mask*make_projection_weights(kk[3],sh[-2],sh[-1])
             return w+dw
 
     
-    # method for mutating projection weights
+    # method for mutating projection weights.
     def mutate_projection_weights(self,connectivity_grid,geno_projections,mutation_rate,projection_type):
         local_changed = False
         pp = np.where(connectivity_grid)
@@ -1150,7 +1168,7 @@ class nn:
         return geno_projections, local_changed
     
     
-    # method for mutating neuromodulation projection execution priorities
+    # method for mutating neuromodulation projection execution priorities.
     def mutate_projection_priority(self,connectivity_grid,geno_projections):
         local_changed = False
         pp = np.where(connectivity_grid)
@@ -1167,6 +1185,7 @@ class nn:
         return geno_projections, local_changed
     
     
+    # mutate this individual.
     def mutate(self,i_generation):
         pprint('start mutation with RNG state:', self.rng_key)
         
@@ -1188,7 +1207,7 @@ class nn:
         self.rng_key, k = jax.random.split(self.rng_key)
         if jax.random.uniform(k) < cfg.singleton_genes_mutation_rate:
             self.rng_key, k = jax.random.split(self.rng_key)
-            self.action_sigma_bias += cfg.action_sigma_mutation_strength*jax.random.normal(k,[1])[0]
+            self.action_sigma_bias += cfg.action_sigma_bias_mutation_strength*jax.random.normal(k,[1])[0]
             self.action_sigma_bias = np.clip(self.action_sigma_bias,cfg.action_sigma_bias_range[0],cfg.action_sigma_bias_range[1])
             changed = True
             self.mutations_applied.append('action_sigma_bias')
@@ -1266,7 +1285,7 @@ class nn:
         return self.mutations_applied
         
     
-    # reset NN to newborn state
+    # reset NN to newborn state.
     def reset(self):
         self.init_pheno_projections()
         self.action_history = []
@@ -1279,8 +1298,10 @@ class nn:
         self.trial_fitness_log = []
         self.trial_grads = []
         self.initialise_rl_optimiser()
+        self.set_activation_functions()
         
         
+    # initialise a fresh RL optimiser (if an explicit optimiser is specified).
     def initialise_rl_optimiser(self):
         if cfg.rl_optimiser is not None:
             if cfg.rl_optimiser is optax.sgd:
@@ -1298,6 +1319,8 @@ class nn:
             self.opt_state = None
         
     
+    # reports mean magnitude of activatory and modulatory weights, in string format.
+    # used by the main process to print statistics during evolution.
     def report_weight_stats(self):
         a_sum_size = 0
         a_sum_weight = 0
@@ -1314,16 +1337,4 @@ class nn:
         if m_sum_size:
             m_sum_weight /= m_sum_size
         return 'a:'+str(a_sum_weight)+' m:'+str(m_sum_weight)
-    
-    
-    def report_total_weight_change(self):
-        weight_change = 0
-        for i in range(self.n_columns):
-            for j in range(self.n_columns):
-                if self.connectivity_grid_a[i,j]:
-                    gw = self.geno_projections_a[i,j].w
-                    sus = self.rl_susceptible[i,j]
-                    pw = self.w_list_a[self.io_list_a.index((i,j,sus))]
-                    weight_change += np.abs(pw-gw[None]).sum()
-        return weight_change
         

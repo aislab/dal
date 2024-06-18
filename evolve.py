@@ -39,29 +39,9 @@ if cfg.visualisation:
 process_pool_executor = None
 
 
-# Colours used for plotting of the evolution process.
-pink = np.array([138,43,226])/255
-purple = np.array([255,192,203])/255
-
-
-# Initialiser method for pool processes.
-# Signal handler for ignoring SIGINT is added to allow clean exit on Control-C.
-# Pool processes typically die on Control-C, which causes the process pool executor to hang when
-# trying to exit. Letting the processes survive Control-C allows the executor to clean the pool up
-# gracefully when exiting.
-def process_initialiser():
-    print('Initialising pool process with PID:', os.getpid())
-    signal.signal(signal.SIGINT,signal.SIG_IGN)
-
-
-def set_up_process_pool(n_processes):
-    global process_pool_executor
-    print('Main process (PID: ', os.getpid(), ') sets up process pool.',sep='')
-    process_pool_executor = concurrent.futures.ProcessPoolExecutor(max_workers=n_processes,initializer=process_initialiser)
-    #TODO: do we need this call?
-    # Call pool with a dummy task to force the initialisation (jax import must happen before the main thread calls jax).
-    x = process_pool_executor.map(lambda x:x,[None]*n_processes,chunksize=1)
-    print('process pool initialised with', n_processes, 'processes.')
+# Colours used for plotting learning progress.
+colour_first = np.array([200,200,200])/255
+colour_last = np.array([100,100,100])/255
 
 
 # Class Neural net wrapped in sub-process
@@ -103,7 +83,7 @@ class SPNN:
     
 
 # Sets up a subprocess-wrapped NN.
-# If the nn is given, we wrap it in a process.
+# If nn is given, we wrap it in a process.
 # If nn is None, we initialise a new one.
 # main_pipe is used to communicate with the main process.
 # peer_pipe is used for direct information transfer between NNs.
@@ -114,8 +94,8 @@ def nn_subprocess(rng_key,main_pipe,peer_pipe,i,nn):
     # Why CPU? NN architecture is evolvable, so we cannot assume all NNs in the population to have the computational graph.
     # Consequently we cannot simply vmap or pmap over the population to parallelise on GPU.
     # Processing a relatively large number of relatively small but heterogeneous computational graphs turned out to be 
-    # more efficient to parallelise NNs over CPU cores than on GPU on our hardware (a machine with 128 CPU cores).
-    # Note: It should in principle be possible to pad all NNs with dummy connection to a unified architecture and then 
+    # more efficient to parallelise over CPU cores than on GPU on our hardware (a machine with 128 CPU cores).
+    # Note: It should in principle be possible to pad all NNs with dummy connections to a unified architecture and then 
     # parallelise on GPU, but we have not implemented that here.
     with jax.default_device(jax.devices("cpu")[0]):
         
@@ -126,8 +106,6 @@ def nn_subprocess(rng_key,main_pipe,peer_pipe,i,nn):
             
         nn.set_id_global()
         nn.peer_pipe = peer_pipe
-        # redo setup of activation functions because functions cannot be pushed through pipes
-        nn.set_activation_functions()
         
         while True:
             # NN waits for commands from main process
@@ -240,7 +218,7 @@ def rewrap_population(pop):
     return new_pop
 
 
-# Runs a single trial with the given population.
+# runs a single trial with the given population.
 def run_trial(env_reset_key,action_keys,i_generation,i_trial,pop,t_prev_trial_start):
     
     n_pop = len(pop)
@@ -310,6 +288,7 @@ def run_trial(env_reset_key,action_keys,i_generation,i_trial,pop,t_prev_trial_st
     return trial_fitness, trial_reward, state, t_prev_trial_start, image
 
 
+# evaluate a single generation (plus optionally an auxiliary population of test dummies).
 def eval_generation(rng_key_for_env,rng_key_for_actions,i_generation,pop,aux_pop=None):
     
     if aux_pop is not None:
@@ -377,7 +356,7 @@ def eval_generation(rng_key_for_env,rng_key_for_actions,i_generation,pop,aux_pop
     
     
     
-# time series
+# lists for holding time series data during evolution.
 ts_focal_fitness = [] 
 ts_focal_fitness_rl_only = []
 ts_focal_fitness_nm_only = []
@@ -390,6 +369,9 @@ ts_learning_type_ratio = []
 ts_weight_change_nm = []
 ts_weight_change_rl = []
        
+
+# generate the next generation.
+# also reports statistics for the completed generation and plots progress of the evolution process.
 def next_generation(rng_key,evo_log,pop,i_generation,aux_pop=None):
     print('generate next generation with rng_key:', rng_key)
     
@@ -539,28 +521,32 @@ def next_generation(rng_key,evo_log,pop,i_generation,aux_pop=None):
     emphasis_interval = 5
     for i in range(cfg.n_trials_per_individual):
         r = i/(cfg.n_trials_per_individual-1)
-        c = tuple(r*pink+(1-r)*purple)
+        c = tuple(r*colour_last+(1-r)*colour_first)
         emphasis = i%emphasis_interval==emphasis_interval-1
         width = 1.0 if emphasis else 0.5
-        plt.plot(t,ar_learning_progress[:,i],color=c,lw=width)
-    plt.plot(t,ts_mean_fitness,'black')
-    plt.plot(t,ts_focal_fitness_rl_only,'darkred')
-    plt.plot(t,ts_focal_fitness_nm_only,'magenta')
-    plt.plot(t,ts_focal_fitness,'red')
-    plt.plot(t,ts_unmutated_fitness,'orange')
+        #label = 'learning progress (first)' if i==0 else ('learning progress (last)' if i==cfg.n_trials_per_individual-1 else None)
+        plt.plot(t,ar_learning_progress[:,i],color=c,lw=width)#,label=label)
+    plt.plot([0],[0],color=colour_first,label='learning progress (first)')
+    plt.plot([0],[0],color=colour_last,label='learning progress (last)')
+    plt.plot(t,ts_mean_fitness,'black',label='mean fitness')
+    plt.plot(t,ts_focal_fitness_rl_only,'blue',label='RL-only fitness')
+    plt.plot(t,ts_focal_fitness_nm_only,'magenta',label='NM-only fitness')
+    plt.plot(t,ts_focal_fitness,'orange',label='focal fitness')
+    plt.plot(t,ts_unmutated_fitness,'red',label='unmutated fitness')
     div = max(np.max(ts_weight_change_nm),1)
-    plt.plot(t,list(np.array(ts_weight_change_nm)/div),'lightblue')
+    plt.plot(t,list(np.array(ts_weight_change_nm)/div),'plum',label='NM weight change (normalised)')
     div = max(np.max(ts_weight_change_rl),1)
-    plt.plot(t,list(np.array(ts_weight_change_rl)/div),'lightgreen')
+    plt.plot(t,list(np.array(ts_weight_change_rl)/div),'deepskyblue',label='RL weight change (normalised)')
     norm_rl = np.array(ts_rl_learning_rate)
     max_norm_rl = norm_rl.max()
     if max_norm_rl>0: norm_rl /= max_norm_rl
-    plt.plot(t,norm_rl,'limegreen')
-    plt.plot(t,ts_action_sigma_bias,'darkgreen')
-    plt.plot(t,ts_learning_type_ratio,'grey')
+    plt.plot(t,norm_rl,'limegreen',label='RL learning rate (normalised)')
+    plt.plot(t,ts_action_sigma_bias,'darkgreen',label='action sigma bias')
+    plt.plot(t,ts_learning_type_ratio,'lightseagreen',label='ratio of change due to NM')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
     ymin, ymax = plt.gca().get_ylim()
     plt.yticks(np.arange(np.round(ymin,1),ymax,0.1))
-    plt.grid()
+    plt.grid(color='lightgrey')
     plt.draw()
     plt.pause(0.001)
     
@@ -596,6 +582,7 @@ def next_generation(rng_key,evo_log,pop,i_generation,aux_pop=None):
     return pop, aux_pop
 
 
+# save the population to disk, along with the current RNG state.
 def save_population(rng_key,pop,i_generation):
     fname = 'generation'+str(i_generation).zfill(5)
     print('saving population state to:\n',fname)
@@ -616,6 +603,7 @@ def save_population(rng_key,pop,i_generation):
     print('save completed')
 
 
+# load previously saved population and RNG state.
 def load_population(i_generation,n_truncate=None):
     fname = 'generation'+str(i_generation).zfill(5)
     print('loading population state from:\n', fname)
@@ -644,7 +632,7 @@ def load_population(i_generation,n_truncate=None):
     return state['rng_key'], spnn_pop
     
 
-# sets up the environment and its visualiser
+# set up the environment and its visualiser
 def set_up_environment():
     global env, vis
     env = Environment()
@@ -727,7 +715,7 @@ if __name__ == '__main__':
         # make the next generation
         rng_key, k = jax.random.split(rng_key)
         pop, aux_pop = next_generation(k,evo_log,pop,i_generation,aux_pop=aux_pop)
-        plt.savefig('plot_'+str(args.from_generation).zfill(4)+'.png')
+        plt.savefig('plot_'+str(args.from_generation).zfill(4)+'.png',bbox_inches="tight")
         
         # if we hit the save interval, save the population to disk
         if i_generation%cfg.save_interval==0:

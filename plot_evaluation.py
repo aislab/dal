@@ -30,8 +30,9 @@ for i_run in range(len(args)//2):
 
     t = np.arange(reward_mean.shape[0])+1
 
-    plt.fill_between(t,reward_min,reward_max,color=style[i_run][0],alpha=0.05,zorder=style[i_run][1],lw=0)
-    plt.plot(t,reward_mean,color=style[i_run][0],alpha=0.4,zorder=style[i_run][1]+5,label=label)
+    i_stype = i_run%len(style)
+    plt.fill_between(t,reward_min,reward_max,color=style[i_stype][0],alpha=0.05,zorder=style[i_stype][1],lw=0)
+    plt.plot(t,reward_mean,color=style[i_stype][0],alpha=0.4,zorder=style[i_stype][1]+5,label=label)
 
 
 plt.ylim([-0.25,1.05])
