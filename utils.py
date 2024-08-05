@@ -42,5 +42,7 @@ def print_progress(i=1,n=1,w=20,message=None):
     string = '  ['+('▆'*i)+' '*(w-i)+'] '+p+'%'
     if message is not None:
         string += '  '+str(message)
+    else:
+        string += ' '*20
     string += ' '*5
     print(string+'\r',end='\n' if r==1 else '')

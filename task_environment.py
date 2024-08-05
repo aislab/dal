@@ -49,7 +49,7 @@ def _step(i_step,agent_pos,goal_pos,action):
 
 
 @jax.jit
-def apply_continuous_task_variation(d_goal,obs_variation_angles,obs_variation_shifts):
+def apply_continuous_task_variation(d_goal,obs_variation_angles):
     
     if cfg.space_dims==2:
         angles = jp.arctan2(d_goal[...,1],d_goal[...,0])+obs_variation_angles[...,0]
@@ -59,21 +59,31 @@ def apply_continuous_task_variation(d_goal,obs_variation_angles,obs_variation_sh
         d_goal = jp.stack((x,y),axis=-1)
     
     if cfg.space_dims==3: # This case could be implemented more efficiently
-        
-        lengths = jp.linalg.norm(d_goal[...,:2],axis=-1)
+              
+        # rotate around x-axis
+        lengths = jp.linalg.norm(d_goal[...,(1,2)],axis=-1)
         x,y,z = d_goal[...,0], d_goal[...,1], d_goal[...,2]
-        angles = jp.arctan2(y,x)+obs_variation_angles[...,0]
-        x = lengths*jp.cos(angles)
-        y = lengths*jp.sin(angles)
-        d_goal = jp.stack((x,y,z),axis=-1)
-        
-        lengths = jp.linalg.norm(d_goal[...,1:],axis=-1)
-        x,y,z = d_goal[...,0], d_goal[...,1], d_goal[...,2]
-        angles = jp.arctan2(z,y)+obs_variation_angles[...,1]
+        angles = jp.arctan2(z,y)+obs_variation_angles[...,0]
         y = lengths*jp.cos(angles)
         z = lengths*jp.sin(angles)
         d_goal = jp.stack((x,y,z),axis=-1)
 
+        # rotate around y-axis
+        lengths = jp.linalg.norm(d_goal[...,(0,2)],axis=-1)
+        x,y,z = d_goal[...,0], d_goal[...,1], d_goal[...,2]
+        angles = jp.arctan2(z,x)+obs_variation_angles[...,1]
+        x = lengths*jp.cos(angles)
+        z = lengths*jp.sin(angles)
+        d_goal = jp.stack((x,y,z),axis=-1)
+        
+        # rotate around z-axis
+        lengths = jp.linalg.norm(d_goal[...,(0,1)],axis=-1)
+        x,y,z = d_goal[...,0], d_goal[...,1], d_goal[...,2]
+        angles = jp.arctan2(y,x)+obs_variation_angles[...,2]
+        x = lengths*jp.cos(angles)
+        y = lengths*jp.sin(angles)
+        d_goal = jp.stack((x,y,z),axis=-1)
+        
     return d_goal
     
 
@@ -93,45 +103,34 @@ class Environment:
         rng_key, k = jax.random.split(rng_key)
         
         if cfg.space_dims == 2:
-            self.obs_variation_angles = 2*np.pi*jax.random.uniform(k,[cfg.n_task_instances,cfg.space_dims-1])
+            self.obs_variation_angles = 2*np.pi*jax.random.uniform(k,[cfg.n_task_instances,1])
         
         if cfg.space_dims == 3:
-            p = jax.random.normal(k,[cfg.n_task_instances,cfg.space_dims])
-            p /= jp.linalg.norm(p,axis=-1,keepdims=True)
-            x,y,z = p[...,0], p[...,1], p[...,2]
-            xy_angles = jp.arctan2(y,x)
-            yz_angles = jp.arctan2(z,y)
-            self.obs_variation_angles = np.stack((xy_angles,yz_angles),axis=-1)
+            self.obs_variation_angles = 2*np.pi*jax.random.uniform(k,[cfg.n_task_instances,3])
         
-        self.obs_variation_angles = np.tile(self.obs_variation_angles,(n_pop,1,1))
-        self.obs_variation_shifts = np.random.uniform(-0.5,0.5,(cfg.n_task_instances,2))
-        rng_key, k = jax.random.split(rng_key)
+        self.obs_variation_angles = self.obs_variation_angles[None]
     
     
     def reset(self, rng_key: jp.ndarray, n_pop):
-        
         agent_pos = jp.zeros((n_pop,cfg.n_task_instances,cfg.space_dims),dtype=float)
         goal_pos = self.set_random_goal(rng_key,n_pop)
         reward = np.zeros((n_pop,cfg.n_task_instances))
         state = State(agent_pos,goal_pos,0,reward)
         self.trial_fitness = 0
-        
         return state
 
     
     def step(self, state: State, action: jp.ndarray):
-        
         agent_pos, reward = _step(state.step,state.agent_pos,state.goal_pos,action)
         self.trial_fitness += reward
         state.step = state.step+1
         state = State(agent_pos,state.goal_pos,state.step,reward)
-
         return state
         
         
     def get_observation(self,state):
         d_goal = np.array(state.goal_pos-state.agent_pos)
-        d_goal = apply_continuous_task_variation(d_goal,self.obs_variation_angles,self.obs_variation_shifts)
+        d_goal = apply_continuous_task_variation(d_goal,self.obs_variation_angles)
         return d_goal
     
     

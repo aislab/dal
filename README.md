@@ -1,7 +1,8 @@
 
+
 ## Introduction
 
-This repository contains the source code for the experiments described in the following paper:\
+This repository contains source code for the experiments described in the following paper:\
 __Breaching the Bottleneck: Evolutionary Transition from Reward-Driven Learning to Reward-Agnostic Domain-Adapted Learning in Neuromodulated Neural Nets__
 
 ### Dependencies
@@ -19,7 +20,7 @@ To run comparative evaluation with the Stable Baselines 3 implementation of A2C,
 ### Notes
 
 - The implementation is designed to run on CPUs, to facilitate parallel evaluation of populations of neural networks of heterogeneous architecture. Each individual runs as a separate subprocess, so the system runs best on machines with many CPU cores.
-- If you get GPU OOM errors, chances are the subprocesses are all trying to claim GPU memory. An easy solution is to make the GPU(s) invisible using e.g. the CUDA_VISIBLE_DEVICES environment variable.
+- If you get GPU OOM errors, chances are the subprocesses are all trying to claim GPU memory. An easy solution is to make your GPU(s) invisible using e.g. the CUDA_VISIBLE_DEVICES environment variable.
 - When running on a screenless machine you may need a virtual framebuffer. We used xvfb for this as follows: `xvfb-run -a python run.py RUN_NAME [FROM_GENERATION] [-u] [-e]`.
 
 ## Evolution
@@ -42,7 +43,7 @@ When starting a new run named `RUN_NAME`, the following happens:
 
 This means that what is actually running now is not the code in the base directory, but the copy thereof in the run's own source directory.
 
-When resuming an existing run, you should indicate whether or not you want to copy the source files again or not. If the `-u` flag ("update") is set, the source files in the base directory will be copied to the `runs/RUN_NAME/source/` directory again.
+When resuming an existing run, you should indicate whether or not you want to copy the source files again. If the `-u` flag ("update") is set, the source files in the base directory will be copied to the `runs/RUN_NAME/source/` directory again.
 
 A few implications:
 -   Modifying source in the base directory does not affect a running run.
@@ -92,7 +93,7 @@ Where:\
 The plot is saved to the base directory.
 
 Notes:
-- If your runs have different lengths, set the limit variable at the top of `plot_evolution_multi.py` to specify the number of generations to plot.
+- If your runs have different lengths, set the `limit` variable at the top of `plot_evolution_multi.py` to specify the number of generations to plot.
 - Plotting over multiple runs assumes that all runs have RL and NM both enabled.
 
 ## Evaluation
@@ -152,8 +153,8 @@ The test set of target positions is fixed across the generations, and determined
 
 ---
 
-## Citation
-Breaching the Bottleneck: Evolutionary Transition from Reward-Driven Learning to Reward-Agnostic Domain-Adapted Learning in Neuromodulated Neural Nets\
+## Paper
 Solvi Arnold, Reiji Suzuki, Takaya Arita, Kimitoshi Yamazaki\
-ALIFE 2024 (The 2024 Conference on Artificial Life)
-
+Breaching the Bottleneck: Evolutionary Transition from Reward-Driven Learning to Reward-Agnostic Domain-Adapted Learning in Neuromodulated Neural Nets\
+ALIFE 2024: Proceedings of the 2024 Artificial Life Conference\
+https://direct.mit.edu/isal/proceedings/isal2024/36/12/123531

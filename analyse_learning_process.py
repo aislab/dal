@@ -23,7 +23,7 @@ def analyse():
     
     for i_generation in generations_to_analyse:
         
-        print('loading generation:', i_generation)
+        print('\ngeneration:', i_generation)
         _rng_key, pop = evolve.load_population(i_generation,1)
         pop[0].send('reset')
         n_pop = len(pop)
@@ -42,7 +42,7 @@ def analyse():
         
         print('running first trial')
         trial_fitness, trial_reward, state, t_prev_trial_start, ims = evolve.run_trial(env_reset_key,action_keys,i_generation,i_trial,pop,t_prev_trial_start)
-        print('trial fitness:', trial_fitness)
+        utils.print_progress()
         
         pop[0].send('report_action_history')
         action_history = pop[0].recv()
@@ -60,8 +60,6 @@ def analyse():
             actions = env_module.action_shaping(action_history[:,0,i_instance])/cfg.n_trial_time_steps
             action_lengths = jp.linalg.norm(actions,axis=-1)
             positions = jp.cumsum(actions,axis=0)
-            print('positions', positions.shape)
-            print(positions)
             
             positions = jp.concatenate((jp.zeros((1,2)),positions),axis=0)
             loc = env_module.action_shaping(action_history[:,1,i_instance])/cfg.n_trial_time_steps
@@ -88,11 +86,14 @@ def analyse():
             plt.scatter(goal[0],goal[1],c=colours[i_instance],zorder=6)
             
             
-        plt.savefig('analysis_gen'+str(i_generation)+'.svg',format='svg',bbox_inches='tight')
+        image_path = 'analysis_gen'+str(i_generation)+'.svg'
+        plt.savefig(image_path,format='svg',bbox_inches='tight')
+        print('image saved to:\n ', os.getcwd()+'/'+image_path)
         plt.clf()
         
         pop[0].send('terminate')
-
+        
+    print('\ncompleted\n')
 
 if __name__ == '__main__':
     # set_start_method must be inside main clause

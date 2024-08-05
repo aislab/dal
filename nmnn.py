@@ -190,7 +190,7 @@ def guided_weight_init_loss(n_a,
         loss, w = carry
         beta, tgtw, am, ai, aj_postsum = x
         
-        w, g = w_update_nm(w,w_geno,beta,tgtw,am,ai,nm_proj_w)
+        w_new, eta = w_update_nm(w,w_geno,beta,tgtw,am,ai,nm_proj_w)
         
         if cfg.guided_weight_modification_loss_locus == 'weight':
             if cfg.guided_weight_modification_diff_function == 'mae':
@@ -200,11 +200,11 @@ def guided_weight_init_loss(n_a,
         
         if cfg.guided_weight_modification_loss_locus == 'activation':
             
-            aj_new = multi_w_dense_forward(w,ai,activation_function_i)
+            aj_new = multi_w_dense_forward(w_new,ai,activation_function_i)
             aj_via_final = multi_w_dense_forward(w_final,ai,activation_function_i)
             
             if cfg.actvation_locus_loss_considers_activation_from_elsewhere:
-                aj_local = multi_w_dense_forward(w,ai,activation_function_i)
+                aj_local = multi_w_dense_forward(w_new,ai,activation_function_i)
                 aj_from_elsewhere = aj_postsum-aj_local
                 aj_new += aj_from_elsewhere
                 aj_via_final += aj_from_elsewhere
@@ -221,9 +221,9 @@ def guided_weight_init_loss(n_a,
         if cfg.nm_beta_enabled and cfg.nm_beta_loss_weight>0:
             l += cfg.nm_beta_loss_weight*beta.mean(1)/n_steps
         if cfg.nm_eta_enabled and cfg.nm_eta_loss_weight>0:
-            l += cfg.nm_eta_loss_weight*g.mean((1,2))/n_steps
+            l += cfg.nm_eta_loss_weight*eta.mean((1,2))/n_steps
         
-        return (loss+l,w), l
+        return (loss+l,w_new), l
         
     loss = jp.zeros(cfg.n_task_instances)
     (loss,w),loss_seq = jax.lax.scan(f,(loss,w),(rate_seq,target_seq,activation_history_k,activation_history_i,activation_history_j))
@@ -291,7 +291,6 @@ def guided_weight_modification_m(rng_key,
     stale = 0
     improvement_streak = 0
     n_updates_performed = 0
-    keep = False
     
     if new_projection:
         rng_key, *kk = jax.random.split(rng_key,3)
@@ -366,24 +365,21 @@ def guided_weight_modification_m(rng_key,
     
     if cfg.guided_weight_modification_loss_locus == 'activation':
         
+        n = cfg.n_trials_to_use_in_guided_init_loss_weights
+        
         f = jax.vmap(dense_forward,in_axes=[None,0,None])
-        aj_via_geno = f(w_geno,activation_history_i[-5:,:i_to],activation_function_i)
+        aj_via_geno = f(w_geno,activation_history_i[-n:,:i_to],activation_function_i)
         f = jax.vmap(multi_w_dense_forward,in_axes=[None,0,None])
-        aj_via_final = f(w_final[:i_to],activation_history_i[-5:,:i_to],activation_function_i)
-        aj_new = f(w_a_obtained[:i_to],activation_history_i[-5:,:i_to],activation_function_i)
+        aj_via_final = f(w_final[:i_to],activation_history_i[-n:,:i_to],activation_function_i)
+        aj_new = f(w_a_obtained[:i_to],activation_history_i[-n:,:i_to],activation_function_i)
         
         if cfg.actvation_locus_loss_considers_activation_from_elsewhere:
             f = multi_multi_w_dense_forward
-            aj_via_original = f(jp.array(w_record[-6:-1])[:,:i_to],activation_history_i[-5:,:i_to],activation_function_i)
-            aj_from_elsewhere = activation_history_j[-5:,:i_to]-aj_via_original
+            aj_via_original = f(jp.array(w_record[-n-1:-1])[:,:i_to],activation_history_i[-n:,:i_to],activation_function_i)
+            aj_from_elsewhere = activation_history_j[-n:,:i_to]-aj_via_original
             aj_via_geno += aj_from_elsewhere
             aj_via_final += aj_from_elsewhere
             aj_new += aj_from_elsewhere
-            pprint('*'*30)
-            pprint('w_record:', jp.array(w_record).shape)
-            pprint('aj_via_original:', aj_via_original.shape, 'aj_from_elsewhere:', aj_from_elsewhere.shape)
-            pprint('aj_from_elsewhere magnitude:', jp.abs(aj_from_elsewhere).sum())
-            pprint('*'*30)
         
         if cfg.actvation_locus_loss_applies_activation_functions:
             aj_via_geno = activation_function_j(aj_via_geno)
@@ -397,19 +393,29 @@ def guided_weight_modification_m(rng_key,
         d_original = (fitness_weights[:i_to,None,None]*jp.abs(w_final[:i_to]-w_a[:i_to])).mean()
         d_obtained = (fitness_weights[:i_to,None,None]*jp.abs(w_final[:i_to]-w_a_obtained[:i_to])).mean()
     
+    if jp.isnan(d_obtained).any():
+        pprint('guided modification failed with NaN --> discard')
+        return None, None
     
     pprint('loss improvement:', initial_loss, '-->', best_loss, '(', n_updates_performed, '/', n_max_iterations, 'updates)')
     pprint('better than nothing at end?', d_obtained<d_original)
     pprint('d_original:', d_original, 'd_obtained:', d_obtained)
-    if d_obtained<d_original: keep = True
     
-    if jp.isnan(d_obtained).any():
+    # determine if the obtained weight matrix outperforms the genotypic weight matrix
+    keep = d_obtained<d_original
+    
+    # if the obtained weight matrix was worse, we discard the result
+    if not keep:
+        pprint('no improvement --> discard')
         return None, None
     
-    if d_obtained >= d_original:
-        pprint('no improvement')
-        return None, None
+    # if we are not printing analysis of the optimisation result, we are done here
+    if cfg.suppress_nn_prints:
+        return best_m_weights, w_geno
     
+    # below this point we run a basic comparison between the original learning process and the learning process with the new weight matrix,
+    # on the (false) assumption that the activation sequence on the pre-synaptic and modulating columns remain the same.
+    # results are printed to the terminal only, so we can skip this if nn prints are suppressed.
     pprint('range of fitness_weights:', fitness_weights.min(), fitness_weights.max())
     pprint('number of non-zero fitness weights:', (fitness_weights>0).sum(), '/', fitness_weights.shape[0])
     
@@ -456,13 +462,9 @@ def guided_weight_modification_m(rng_key,
             pprint('step', i+1, 'g:', g.mean(), 'diff:', df_mean, 'history:', dh_mean, '=' if df_mean==dh_mean else ('o' if df_mean<dh_mean else 'x'))
             
         i += 1
-
-    if keep:
-        pprint('keep condition met --> keep')
-        return best_m_weights, w_geno
-    else:
-        pprint('keep condition not met --> discard')
-        return None, None
+        
+    pprint('keep condition met')
+    return best_m_weights, w_geno
         
     
 # internal grad-compatible forward

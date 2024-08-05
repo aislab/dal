@@ -97,62 +97,61 @@ def nn_subprocess(rng_key,main_pipe,peer_pipe,i,nn):
     # more efficient to parallelise over CPU cores than on GPU on our hardware (a machine with 128 CPU cores).
     # Note: It should in principle be possible to pad all NNs with dummy connections to a unified architecture and then 
     # parallelise on GPU, but we have not implemented that here.
-    with jax.default_device(jax.devices("cpu")[0]):
         
-        if nn is None:
-            nn = nmnn.nn(rng_key,i,peer_pipe)
-        else:
-            nn.reset()
-            
-        nn.set_id_global()
-        nn.peer_pipe = peer_pipe
+    if nn is None:
+        nn = nmnn.nn(rng_key,i,peer_pipe)
+    else:
+        nn.reset()
         
-        while True:
-            # NN waits for commands from main process
-            command, *args = main_pipe.recv()
-            try:
-                # if the is a method of the NN, call it.
-                f = eval('nn.'+command)
-            except:
-                # Special command for pulling the NN into the main process.
-                if command == 'get_over_here':
-                    # Optimiser and function attributes don't fit through pipes so we blank those out for a moment.
-                    optimiser = nn.optimiser
-                    opt_state = nn.opt_state
-                    activation_functions = nn.activation_functions
-                    nn.optimiser = None
-                    nn.opt_state = None
-                    nn.activation_functions = None
-                    # Send the NN through the main pipe to the main process.
-                    main_pipe.send(nn)
-                    # Restore optimiser and function attributes.
-                    nn.optimiser = optimiser
-                    nn.opt_state = opt_state
-                    nn.activation_functions = activation_functions
-                # command for setting attribute values in the NN.
-                elif command == 'set':
-                    setattr(nn,args[0],args[1])
-                # Termination commmand. This breaks the command loop, implicitly ending the subprocess.
-                elif command == 'terminate':
-                    break
-                # If we end up here something went wrong...
-                else:
-                    print(' NN subprocess received unknown command type:', command)
-                # If we hit the except clause, we are done with the current command and jump back to waiting for the next.
-                continue
-            
-            # Command was a method of the NN class --> apply the method on the given arguments.
-            ret = f(*args)
-            # If we received a return value, send it to the main process.
-            # Methods without a return statement return None by default.
-            # Note: Be careful when adding methods to the NN class that conditionally return a single None value,
-            # because that None will not be forwarded to the main process, potentially leaving the main process waiting forever.
-            if ret is not None:
-                main_pipe.send(ret)
+    nn.set_id_global()
+    nn.peer_pipe = peer_pipe
+    
+    while True:
+        # NN waits for commands from main process
+        command, *args = main_pipe.recv()
+        try:
+            # if the is a method of the NN, call it.
+            f = eval('nn.'+command)
+        except:
+            # Special command for pulling the NN into the main process.
+            if command == 'get_over_here':
+                # Optimiser and function attributes don't fit through pipes so we blank those out for a moment.
+                optimiser = nn.optimiser
+                opt_state = nn.opt_state
+                activation_functions = nn.activation_functions
+                nn.optimiser = None
+                nn.opt_state = None
+                nn.activation_functions = None
+                # Send the NN through the main pipe to the main process.
+                main_pipe.send(nn)
+                # Restore optimiser and function attributes.
+                nn.optimiser = optimiser
+                nn.opt_state = opt_state
+                nn.activation_functions = activation_functions
+            # command for setting attribute values in the NN.
+            elif command == 'set':
+                setattr(nn,args[0],args[1])
+            # Termination commmand. This breaks the command loop, implicitly ending the subprocess.
+            elif command == 'terminate':
+                break
+            # If we end up here something went wrong...
+            else:
+                print(' NN subprocess received unknown command type:', command)
+            # If we hit the except clause, we are done with the current command and jump back to waiting for the next.
+            continue
         
-        # If we popped out of the command loop the subprocess terminates here.
-        if not cfg.suppress_nn_prints:
-            print('NN#'+str(nn.individual_id), 'terminates')
+        # Command was a method of the NN class --> apply the method on the given arguments.
+        ret = f(*args)
+        # If we received a return value, send it to the main process.
+        # Methods without a return statement return None by default.
+        # Note: Be careful when adding methods to the NN class that conditionally return a single None value,
+        # because that None will not be forwarded to the main process, potentially leaving the main process waiting forever.
+        if ret is not None:
+            main_pipe.send(ret)
+    
+    # If we popped out of the command loop the subprocess terminates here.
+    if not cfg.suppress_nn_prints:
+        print('NN#'+str(nn.individual_id), 'terminates')
 
 
 # Initialise a population of NNs wrapped into subprocesses.
@@ -515,8 +514,10 @@ def next_generation(rng_key,evo_log,pop,i_generation,aux_pop=None):
     
     print('plotting...')
     plt.clf()
-    # plot generation data
+    # time range for plotting
     t = np.arange(i_generation+1-len(ts_focal_fitness),i_generation+1)
+    
+    # plot learning progress
     ar_learning_progress = np.array(ts_learning_progress)
     emphasis_interval = 5
     for i in range(cfg.n_trials_per_individual):
@@ -524,10 +525,12 @@ def next_generation(rng_key,evo_log,pop,i_generation,aux_pop=None):
         c = tuple(r*colour_last+(1-r)*colour_first)
         emphasis = i%emphasis_interval==emphasis_interval-1
         width = 1.0 if emphasis else 0.5
-        #label = 'learning progress (first)' if i==0 else ('learning progress (last)' if i==cfg.n_trials_per_individual-1 else None)
-        plt.plot(t,ar_learning_progress[:,i],color=c,lw=width)#,label=label)
-    plt.plot([0],[0],color=colour_first,label='learning progress (first)')
-    plt.plot([0],[0],color=colour_last,label='learning progress (last)')
+        plt.plot(t,ar_learning_progress[:,i],color=c,lw=width)
+    # labels for learning progress
+    plt.plot([i_generation],[0],color=colour_first,label='learning progress (first)')
+    plt.plot([i_generation],[0],color=colour_last,label='learning progress (last)')
+    
+    # plot tracked quantities
     plt.plot(t,ts_mean_fitness,'black',label='mean fitness')
     plt.plot(t,ts_focal_fitness_rl_only,'blue',label='RL-only fitness')
     plt.plot(t,ts_focal_fitness_nm_only,'magenta',label='NM-only fitness')
@@ -585,7 +588,7 @@ def next_generation(rng_key,evo_log,pop,i_generation,aux_pop=None):
 # save the population to disk, along with the current RNG state.
 def save_population(rng_key,pop,i_generation):
     fname = 'generation'+str(i_generation).zfill(5)
-    print('saving population state to:\n',fname)
+    print('saving population state to:\n ',fname)
     
     nn_pop = []
     for spnn in pop:
@@ -606,7 +609,7 @@ def save_population(rng_key,pop,i_generation):
 # load previously saved population and RNG state.
 def load_population(i_generation,n_truncate=None):
     fname = 'generation'+str(i_generation).zfill(5)
-    print('loading population state from:\n', fname)
+    print('loading population state from:\n ', fname)
     with open(fname,'rb') as f:
         state = pickle.load(f)
         

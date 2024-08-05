@@ -30,12 +30,12 @@ rl_enabled = True
 # environment settings.
 # spatial dimensionality of the navigation task (2 and 3 are supported).
 # settings below are configured for the 2D task.
-# (we got the 3D version to work with more neurons and more trials per individual.)
+# (we got the 3D version to work with more task instances and trials per individual.)
 space_dims = 2
-# dimensionality of the action space
+# dimensionality of the action space.
 act_dims = space_dims
-# dimensionality of the observation space
-# observations are composed 
+# dimensionality of the observation space (i.e. network input space).
+# observations contain the current observation of the goal position, the previous observation of the goal position, and the previous action.
 obs_dims = 2*space_dims+act_dims
 
 # random seed.
@@ -49,11 +49,11 @@ n_generations = 1500
 n_population_size = 100
 n_parent_pool = 25
 n_elite = 5
-# number of task instances to evaluate each individual on
+# number of task instances to evaluate each individual on.
 n_task_instances = 64
-# number of trials to run per task instance
+# number of trials to run per task instance.
 n_trials_per_individual = 50
-# number of steps (observe-act-update) cycles per trial
+# number of steps (observe-act-update) cycles per trial.
 n_trial_time_steps = 10
 
 
