@@ -99,7 +99,7 @@ fixed_weight_multi_multi_w_dense_forward = jax.vmap(fixed_weight_multi_w_dense_f
 
 # gradient clipping.
 def clip_grad_norm(grad, max_norm):
-    norm = jp.linalg.norm(jp.array(jax.tree_util.tree_leaves(jax.tree_map(jp.linalg.norm,grad))))
+    norm = jp.linalg.norm(jp.array(jax.tree_util.tree_leaves(jax.tree.map(jp.linalg.norm,grad))))
     clip = lambda x: jp.where(norm<max_norm,x,x*max_norm/(norm+1e-6))
     return jax.tree_util.tree_map(clip, grad)
     
@@ -176,10 +176,10 @@ def guided_weight_init_loss(n_a,
                             activation_function_j):
 
     n_steps = len(activation_history_k)
-    t = jp.arange(n_steps)/n_steps
-    t = jp.repeat(t[:,None,None],cfg.n_task_instances,axis=1)
-
-    activation_history_k = jp.concatenate((activation_history_k,t),axis=2)
+    #t = jp.arange(n_steps)/n_steps
+    #t = jp.repeat(t[:,None,None],cfg.n_task_instances,axis=1)
+    #activation_history_k = jp.concatenate((activation_history_k,t),axis=2)
+    activation_history_k = jp.pad(activation_history_k,((0,0),(0,0),(0,1)))
     w = jp.broadcast_to(w_geno[None],(cfg.n_task_instances,)+w_geno.shape)
 
     rate_seq, target_seq = multi_nm_beta_and_tgtw(activation_history_k,nm_proj_w)
@@ -236,6 +236,93 @@ def guided_weight_init_loss(n_a,
 guided_init_loss_grad = jax.value_and_grad(guided_weight_init_loss,argnums=(4,6),has_aux=True)
 
 
+# attempt at calculating grads per step to reduce computation cost
+@partial(jax.jit,static_argnums=(0,8,9))
+def mGWM_sub_update(n_a,
+                            activation_history_k,
+                            activation_history_i,
+                            activation_history_j,
+                            w_geno,
+                            w_final,
+                            nm_proj_w,
+                            fitness_weights,
+                            activation_function_i,
+                            activation_function_j,
+                            lr):
+
+    n_steps = len(activation_history_k)
+
+    w = jp.broadcast_to(w_geno[None],w_final.shape)
+
+    def f(nm_proj_w, i_step, w, ak, ai, aj_postsum):
+
+        rates, targets = nm_beta_and_tgtw(ak,nm_proj_w)
+
+        w = jax.lax.stop_gradient(w) # TODO: does this make a difference? (in performance and/or GPU memory use?) -> it should not, cause grads are calculated over f step by step
+        #w, g = w_update_nm(w,rates,targets,ak,ai,nm_proj_w,w_geno)
+        w, g = w_update_nm(w,w_geno,rates,targets,ak,ai,nm_proj_w)
+
+        if cfg.guided_weight_modification_loss_locus == 'weight':
+            if cfg.guided_weight_modification_diff_function == 'mae':
+                l = ((jp.abs(w-w_final))*fitness_weights[:,None,None]).mean((1,2))
+            if cfg.guided_weight_modification_diff_function == 'mse':
+                l = (((w-w_final)**2)*fitness_weights[:,None,None]).mean((1,2))
+            if cfg.guided_weight_modification_diff_function == 'mre':
+                l = ((jp.abs(w-w_final)**.5)*fitness_weights[:,None,None]).mean((1,2))
+
+        if cfg.guided_weight_modification_loss_locus == 'activation':
+
+            aj_new = multi_w_dense_forward(w,ai,activation_function_i,True)
+            aj_via_final = multi_w_dense_forward(w_final,ai,activation_function_i,True)
+
+            if cfg.actvation_locus_loss_considers_activation_from_elsewhere:
+                aj_local = multi_w_dense_forward(w,ai,activation_function_i,True)
+                aj_from_elsewhere = aj_postsum-aj_local
+                aj_new += aj_from_elsewhere
+                aj_via_final += aj_from_elsewhere
+
+            if cfg.actvation_locus_loss_applies_activation_functions:
+                aj_new = activation_function_j(aj_new)
+                aj_via_final = activation_function_j(aj_via_final)
+
+            if cfg.guided_weight_modification_diff_function == 'mae':
+                l = ((jp.abs(aj_new-aj_via_final))*fitness_weights[:,None]).mean(1)
+            if cfg.guided_weight_modification_diff_function == 'mse':
+                l = (((aj_new-aj_via_final)**2)*fitness_weights[:,None]).mean(1)
+            if cfg.guided_weight_modification_diff_function == 'mre':
+                l = ((jp.abs(aj_new-aj_via_final)**.5)*fitness_weights[:,None]).mean(1)
+
+        if cfg.nm_beta_enabled and cfg.nm_beta_loss_weight>0:
+            l += cfg.nm_beta_loss_weight*rates.mean(1)/n_steps
+        if cfg.nm_eta_enabled and cfg.nm_eta_loss_weight>0:
+            l += cfg.nm_eta_loss_weight*g.mean((1,2))/n_steps
+
+        return l.sum(),(i_step+1,w,l)
+
+    def f_with_grad(carry,x):
+        loss, i_step, nm_proj_w, w, grads = carry
+        ak, ai, aj_postsum = x
+        (step_loss_scalar,(i_step,w,step_loss)),step_grads = jax.value_and_grad(f,argnums=0,has_aux=True)(nm_proj_w, i_step, w, ak, ai, aj_postsum)
+        loss += step_loss
+
+        if cfg.cheap_GWM_use_maxgrad:
+            grads = [jp.where(jp.abs(sg)>=jp.abs(g),sg,g) for (g,sg) in zip(grads,step_grads)]
+        else:
+            grads = [(g+sg) for (g,sg) in zip(grads,step_grads)]
+
+        return (loss, i_step, nm_proj_w, w, grads), None
+
+    activation_history_k = jp.pad(activation_history_k,((0,0),(0,0),(0,1)))
+    loss = jp.zeros(w_final.shape[0])
+    grads = [jp.zeros_like(z) for z in nm_proj_w]
+    (loss,_,_,w_new,grads),_ = jax.lax.scan(f_with_grad,(loss,0,nm_proj_w,w,grads),(activation_history_k,activation_history_i,activation_history_j))
+
+    loss_train = loss[cfg.n_validation:].mean()
+    loss_validation = loss[:cfg.n_validation].mean() if cfg.n_validation else 0
+
+    return (loss_train, (loss_validation, w_new)), (None, grads)
+
+
 # guided initialisation for modulatory projections.
 # in the interest of computational efficiency, we assume that the weight updates do not affect future activation patterns at the pre-synaptic and modulating columns.
 # note that this assumption may be violated when column m modulates a projection on a path from the input to column m.
@@ -275,16 +362,18 @@ def guided_weight_modification_m(rng_key,
     n_a = activation_history_k.shape[0]
     
     # calculate fitness weight per task instance
-    fmin = fitness_per_task.min()
-    fmax = fitness_per_task.max()
-    fitness_weights = (fitness_per_task-fmin)/(fmax-fmin)
-    
-    # clip fitness weights at random threshold and rescale to [0,1]
-    if cfg.fitness_weight_clipping:
-        rng_key, k = jax.random.split(rng_key)
-        clip_threshold = jax.random.uniform(k)
-        fitness_weights = (fitness_weights-clip_threshold)/(1-clip_threshold)
-        fitness_weights = jp.clip(fitness_weights,0,1)
+    if cfg.enable_fitness_weighing:
+        fmin = fitness_per_task.min()
+        fmax = fitness_per_task.max()
+        fitness_weights = (fitness_per_task-fmin)/(fmax-fmin)
+        # clip fitness weights at random threshold and rescale to [0,1]
+        if cfg.fitness_weight_clipping:
+            rng_key, k = jax.random.split(rng_key)
+            clip_threshold = jax.random.uniform(k)
+            fitness_weights = (fitness_weights-clip_threshold)/(1-clip_threshold)
+            fitness_weights = jp.clip(fitness_weights,0,1)
+    else:
+        fitness_weights = np.ones(cfg.n_task_instances)
         
     best_loss = np.inf
     best_m_weights = None
@@ -304,16 +393,31 @@ def guided_weight_modification_m(rng_key,
     for i_iteration in range(n_max_iterations):
         
         h = activation_history_k
-        (loss_train,(loss_validation,w_a_obtained)),grads = guided_init_loss_grad(n_a,
-                                                                        h,
-                                                                        activation_history_i,
-                                                                        activation_history_j,
-                                                                        w_geno,
-                                                                        w_final,
-                                                                        m_weights,
-                                                                        fitness_weights,
-                                                                        activation_function_i,
-                                                                        activation_function_j)
+
+        if cfg.cheap_GWM:
+            (loss_train,(loss_validation,w_a_obtained)),grads = mGWM_sub_update(n_a,
+                                                                                h,
+                                                                                activation_history_i,
+                                                                                activation_history_j,
+                                                                                w_geno,
+                                                                                w_final,
+                                                                                m_weights,
+                                                                                fitness_weights,
+                                                                                activation_function_i,
+                                                                                activation_function_j,
+                                                                                lr)
+        else:
+            (loss_train,(loss_validation,w_a_obtained)),grads = guided_init_loss_grad(n_a,
+                                                                            h,
+                                                                            activation_history_i,
+                                                                            activation_history_j,
+                                                                            w_geno,
+                                                                            w_final,
+                                                                            m_weights,
+                                                                            fitness_weights,
+                                                                            activation_function_i,
+                                                                            activation_function_j)
+
         if cfg.n_validation:
             loss = loss_validation
         else:
@@ -1102,8 +1206,8 @@ class nn:
             sh = w.shape
             self.rng_key, *kk = jax.random.split(self.rng_key,5)
             mask = jax.random.uniform(kk[0],sh)<jax.random.uniform(kk[1])
-            dw = cfg.max_weight_mutation_strength*jax.random.uniform(kk[2],sh)*mask*make_projection_weights(kk[3],sh[-2],sh[-1])
-            return w+dw
+            dw = cfg.max_weight_mutation_strength*jax.random.uniform(kk[2],sh)*mask*make_projection_weights(kk[3],sh[0],np.prod(sh[1:]))
+            return w+dw.reshape(sh)
 
     
     # method for mutating projection weights.
